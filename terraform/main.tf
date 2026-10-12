@@ -1,0 +1,110 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~>5.0"
+    }
+  }
+
+  # Store Terraform state centrally so local runs and Jenkins share the same state.
+  backend "s3" {
+    bucket = "monitor-s3-bucket-state"
+    key    = "state/terraform.tfstate"
+    region = "eu-central-1"
+  }
+
+}
+
+provider "aws" {
+  region = var.region
+}
+
+# Create the VPC used by the monitoring server.
+resource "aws_vpc" "monitor_vpc" {
+  cidr_block = var.cidr_block
+  tags = {
+    Name = "monitor_vpc"
+  }
+}
+
+resource "aws_internet_gateway" "monitor-gw" {
+  vpc_id = aws_vpc.monitor_vpc.id
+
+  tags = {
+    Name = "monitor-gw"
+  }
+}
+
+resource "aws_route_table" "monitor-rt" {
+  vpc_id = aws_vpc.monitor_vpc.id
+  route {
+    cidr_block = var.default_cidr
+    gateway_id = aws_internet_gateway.monitor-gw.id
+  }
+  tags = {
+    Name = "monitor-rt"
+  }
+}
+
+resource "aws_route_table_association" "monitor-rta" {
+  subnet_id      = aws_subnet.monitor_subnet.id
+  route_table_id = aws_route_table.monitor-rt.id
+
+}
+
+# Derive a /24 subnet from the configured VPC CIDR.
+resource "aws_subnet" "monitor_subnet" {
+  vpc_id     = aws_vpc.monitor_vpc.id
+  cidr_block = cidrsubnet(var.cidr_block, 8, 2)
+
+  tags = {
+    Name = "monitor-subnet"
+  }
+}
+
+# Allow SSH, HTTP, and the monitoring API.
+# Restrict these CIDRs to trusted addresses outside a demo environment.
+resource "aws_security_group" "monitor-sg" {
+  name   = "monitor-sg"
+  vpc_id = aws_vpc.monitor_vpc.id
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.default_cidr]
+  }
+  ingress {
+    from_port   = 5000
+    to_port     = 5000
+    protocol    = "tcp"
+    cidr_blocks = [var.default_cidr]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [var.default_cidr]
+  }
+  tags = {
+    Name = "monitor-sg"
+  }
+}
+
+resource "aws_instance" "monitor" {
+  ami                         = var.ami
+  instance_type               = var.instance_type
+  subnet_id                   = aws_subnet.monitor_subnet.id
+  vpc_security_group_ids      = [aws_security_group.monitor-sg.id]
+  key_name                    = aws_key_pair.deployer.key_name
+  associate_public_ip_address = true
+
+  tags = {
+    Name = "monitor"
+  }
+}
+
+resource "aws_key_pair" "deployer" {
+  key_name   = "monitor-key"
+  public_key = file(pathexpand(var.ssh_key_path))
+}
+
